@@ -40,6 +40,7 @@ logger = logging.getLogger("gmp-face")
 logger.info("Loading InsightFace buffalo_l model...")
 face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
 face_app.prepare(ctx_id=0, det_size=(DET_SIZE, DET_SIZE))
+_current_det_size = DET_SIZE
 logger.info("InsightFace model loaded successfully.")
 
 app = Flask(__name__)
@@ -74,6 +75,15 @@ def load_image_from_bytes(data: bytes) -> np.ndarray | None:
     except Exception as e:
         logger.error(f"Failed to load image from bytes: {e}")
         return None
+
+
+def prepare_det_size(det_size: int):
+    """Re-prepare the model if the requested det_size differs from current."""
+    global _current_det_size
+    if det_size != _current_det_size:
+        logger.info(f"Switching detection size from {_current_det_size} to {det_size}")
+        face_app.prepare(ctx_id=0, det_size=(det_size, det_size))
+        _current_det_size = det_size
 
 
 def get_best_face(img: np.ndarray):
@@ -122,8 +132,10 @@ def select_index():
 
     photos = data["photos"]
     group_id = data.get("group_id")
+    det_size = int(data.get("det_size", DET_SIZE))
 
-    logger.info(f"select-index: group_id={group_id}, photos={len(photos)}")
+    logger.info(f"select-index: group_id={group_id}, photos={len(photos)}, det_size={det_size}")
+    prepare_det_size(det_size)
 
     best_photo_id = None
     best_score = -1.0
@@ -181,8 +193,10 @@ def cluster_faces():
 
     photos = data["photos"]
     event_id = data.get("event_id")
+    det_size = int(data.get("det_size", DET_SIZE))
 
-    logger.info(f"cluster-faces: event_id={event_id}, photos={len(photos)}")
+    logger.info(f"cluster-faces: event_id={event_id}, photos={len(photos)}, det_size={det_size}")
+    prepare_det_size(det_size)
 
     # Step 1: Detect faces and extract encodings
     face_data = []  # list of (photo_id, encoding, quality_score)
