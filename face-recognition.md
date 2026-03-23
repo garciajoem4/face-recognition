@@ -342,6 +342,81 @@ def search_face():
 
 
 # -------------------------------------------------------------------
+# ENDPOINT: /crop-faces
+# Receives a batch of photos, detects faces, crops the face region
+# with padding, and saves cropped images to the specified output paths.
+# -------------------------------------------------------------------
+@app.route("/crop-faces", methods=["POST"])
+def crop_faces():
+    data = request.get_json(silent=True)
+    if not data or "photos" not in data:
+        return jsonify({"error": "Missing photos array"}), 400
+
+    photos = data["photos"]
+    det_size = int(data.get("det_size", DET_SIZE))
+    padding = float(data.get("padding", 0.3))
+
+    logger.info(f"crop-faces: {len(photos)} photos, det_size={det_size}, padding={padding}")
+    prepare_det_size(det_size)
+
+    results = []
+    for p in photos:
+        file_path = p.get("file_path")
+        photo_id = p.get("photo_id")
+        output_path = p.get("output_path")
+        if not file_path or not photo_id or not output_path:
+            results.append({"photo_id": photo_id, "success": False, "reason": "missing_params"})
+            continue
+
+        img = load_image(file_path)
+        if img is None:
+            results.append({"photo_id": photo_id, "success": False, "reason": "load_failed"})
+            continue
+
+        face = get_best_face(img)
+        if face is None:
+            results.append({"photo_id": photo_id, "success": False, "reason": "no_face"})
+            continue
+
+        # Crop with padding
+        x1, y1, x2, y2 = face.bbox
+        w, h = x2 - x1, y2 - y1
+        pad_x = w * padding
+        pad_y = h * padding
+        crop_x1 = max(0, int(x1 - pad_x))
+        crop_y1 = max(0, int(y1 - pad_y))
+        crop_x2 = min(img.shape[1], int(x2 + pad_x))
+        crop_y2 = min(img.shape[0], int(y2 + pad_y))
+
+        cropped = img[crop_y1:crop_y2, crop_x1:crop_x2]
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # Save as JPEG
+        try:
+            cv2.imwrite(output_path, cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        except Exception as e:
+            logger.error(f"crop-faces: failed to save {output_path}: {e}")
+            results.append({"photo_id": photo_id, "success": False, "reason": "save_failed"})
+            continue
+
+        bbox_str = f"{int(x1)},{int(y1)},{int(x2)},{int(y2)}"
+        det_score = float(face.det_score) if hasattr(face, "det_score") else 0.5
+        results.append({
+            "photo_id": photo_id,
+            "success": True,
+            "bbox": bbox_str,
+            "quality_score": round(det_score, 4),
+        })
+
+    cropped_count = sum(1 for r in results if r.get("success"))
+    logger.info(f"crop-faces: {cropped_count}/{len(photos)} faces cropped successfully")
+
+    return jsonify({"results": results})
+
+
+# -------------------------------------------------------------------
 # Run
 # -------------------------------------------------------------------
 if __name__ == "__main__":
