@@ -181,6 +181,70 @@ def select_index():
 
 
 # -------------------------------------------------------------------
+# ENDPOINT: /encode-face
+# Receives a pre-cropped face image path. Pads the image to help the
+# face detector find the face, then extracts the 512-dim face encoding.
+# Use this instead of /select-index when index_photo_id is already set
+# (e.g. from face cropping) and only face_encoding is needed.
+# -------------------------------------------------------------------
+@app.route("/encode-face", methods=["POST"])
+def encode_face():
+    data = request.get_json(silent=True)
+    if not data or "file_path" not in data:
+        return jsonify({"error": "Missing file_path"}), 400
+
+    file_path = data["file_path"]
+    group_id = data.get("group_id")
+    det_size = int(data.get("det_size", DET_SIZE))
+
+    logger.info(f"encode-face: group_id={group_id}, file={file_path}, det_size={det_size}")
+    prepare_det_size(det_size)
+
+    img = load_image(file_path)
+    if img is None:
+        return jsonify({"face_encoding": None, "error": "Could not load image"}), 200
+
+    # For cropped face images, the face fills most of the frame.
+    # The detector may fail because it expects more context.
+    # Strategy: try detection first, then pad the image and retry.
+    face = get_best_face(img)
+
+    if face is None:
+        # Pad the image with a border to give the detector context
+        h, w = img.shape[:2]
+        pad = max(h, w) // 2
+        padded = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(128, 128, 128))
+        logger.info(f"encode-face: no face in original {w}x{h}, retrying with padding ({padded.shape[1]}x{padded.shape[0]})")
+        face = get_best_face(padded)
+
+    if face is None:
+        # Last resort: try with a smaller det_size matching the image
+        small_det = min(img.shape[0], img.shape[1], 320)
+        small_det = max(small_det, 128)
+        logger.info(f"encode-face: padding failed, retrying with det_size={small_det}")
+        prepare_det_size(small_det)
+        h, w = img.shape[:2]
+        pad = max(h, w) // 2
+        padded = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(128, 128, 128))
+        face = get_best_face(padded)
+        # Restore original det_size
+        prepare_det_size(det_size)
+
+    if face is None:
+        logger.info(f"encode-face: no face detected for group {group_id}")
+        return jsonify({"face_encoding": None, "quality_score": 0})
+
+    encoding = face.normed_embedding
+    det_score = float(face.det_score) if hasattr(face, "det_score") else 0.5
+
+    logger.info(f"encode-face: group {group_id} → encoding extracted (det_score={det_score:.3f})")
+    return jsonify({
+        "face_encoding": encoding_to_str(encoding),
+        "quality_score": round(det_score, 4),
+    })
+
+
+# -------------------------------------------------------------------
 # ENDPOINT: /cluster-faces
 # Receives a list of photos (no bib), detects faces, clusters them
 # by face similarity using DBSCAN, returns groups.
