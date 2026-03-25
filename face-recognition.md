@@ -337,6 +337,7 @@ def cluster_faces():
 # Receives a selfie (multipart file) and a JSON array of indexed
 # face groups. Compares the selfie face to each group's encoding
 # and returns matching group IDs.
+# Accepts optional det_size form field to match encoding detection size.
 # -------------------------------------------------------------------
 @app.route("/search-face", methods=["POST"])
 def search_face():
@@ -359,7 +360,11 @@ def search_face():
     except json.JSONDecodeError:
         return jsonify({"error": "Invalid groups JSON"}), 400
 
-    logger.info(f"search-face: comparing selfie against {len(groups)} groups")
+    # Use det_size from request or fall back to default
+    det_size = int(request.form.get("det_size", DET_SIZE))
+    prepare_det_size(det_size)
+
+    logger.info(f"search-face: comparing selfie against {len(groups)} groups, det_size={det_size}")
 
     # Detect face in selfie
     selfie_img = load_image_from_bytes(selfie_bytes)
@@ -367,7 +372,30 @@ def search_face():
         return jsonify({"error": "Could not read selfie image"}), 400
 
     selfie_face = get_best_face(selfie_img)
+
+    # If no face detected, retry with padding (selfie may be a tight crop)
     if selfie_face is None:
+        h, w = selfie_img.shape[:2]
+        pad = max(h, w) // 2
+        padded = cv2.copyMakeBorder(selfie_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(128, 128, 128))
+        logger.info(f"search-face: no face in original {w}x{h}, retrying with padding ({padded.shape[1]}x{padded.shape[0]})")
+        selfie_face = get_best_face(padded)
+
+    # Last resort: try with smaller det_size + padding
+    if selfie_face is None:
+        small_det = min(selfie_img.shape[0], selfie_img.shape[1], 320)
+        small_det = max(small_det, 128)
+        logger.info(f"search-face: padding failed, retrying with det_size={small_det}")
+        prepare_det_size(small_det)
+        h, w = selfie_img.shape[:2]
+        pad = max(h, w) // 2
+        padded = cv2.copyMakeBorder(selfie_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(128, 128, 128))
+        selfie_face = get_best_face(padded)
+        # Restore requested det_size
+        prepare_det_size(det_size)
+
+    if selfie_face is None:
+        logger.info("search-face: no face detected after all retries")
         return jsonify({
             "matched_group_ids": [],
             "message": "No face detected in the selfie. Please upload a clear front-facing photo.",
@@ -378,16 +406,20 @@ def search_face():
     # Compare against each group's stored encoding
     matched_group_ids = []
     best_confidence = 0.0
+    skipped_groups = 0
 
     for g in groups:
         group_id = g.get("group_id")
         encoding_str = g.get("face_encoding")
         if not group_id or not encoding_str:
+            skipped_groups += 1
             continue
 
         try:
             group_enc = np.array([float(x) for x in encoding_str.split(",")])
         except (ValueError, TypeError):
+            skipped_groups += 1
+            logger.warning(f"search-face: failed to parse encoding for group {group_id}")
             continue
 
         dist = face_distance(selfie_encoding, group_enc)
@@ -397,7 +429,7 @@ def search_face():
             if confidence > best_confidence:
                 best_confidence = confidence
 
-    logger.info(f"search-face: matched {len(matched_group_ids)} groups (best confidence={best_confidence:.3f})")
+    logger.info(f"search-face: matched {len(matched_group_ids)} groups, skipped {skipped_groups} (best confidence={best_confidence:.3f})")
 
     return jsonify({
         "matched_group_ids": matched_group_ids,
