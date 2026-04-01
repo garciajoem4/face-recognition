@@ -45,6 +45,20 @@ logger.info("InsightFace model loaded successfully.")
 
 app = Flask(__name__)
 
+# Cancel flag file path
+CANCEL_FLAG = os.path.join(tempfile.gettempdir(), "gmp_face_cancel_flag")
+
+
+def is_cancelled():
+    """Check if a cancel has been requested."""
+    if os.path.exists(CANCEL_FLAG):
+        try:
+            os.remove(CANCEL_FLAG)
+        except OSError:
+            pass
+        return True
+    return False
+
 
 def load_image(file_path: str) -> np.ndarray | None:
     """Load an image from a file path and return as BGR numpy array."""
@@ -117,6 +131,21 @@ def health():
         "engine": "insightface",
         "version": "1.0.0",
     })
+
+
+# -------------------------------------------------------------------
+# ENDPOINT: /cancel
+# Sets a cancel flag to stop any in-progress face processing.
+# -------------------------------------------------------------------
+@app.route("/cancel", methods=["POST"])
+def cancel():
+    """Set the cancel flag to stop any in-progress face processing."""
+    try:
+        with open(CANCEL_FLAG, "w") as f:
+            f.write("1")
+        return jsonify({"success": True, "message": "Cancel flag set"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # -------------------------------------------------------------------
@@ -456,7 +485,14 @@ def crop_faces():
     prepare_det_size(det_size)
 
     results = []
+    cancelled = False
     for p in photos:
+        # Check cancel flag before each photo
+        if is_cancelled():
+            cancelled = True
+            logger.info("crop-faces: cancelled by user request")
+            break
+
         file_path = p.get("file_path")
         photo_id = p.get("photo_id")
         output_path = p.get("output_path")
@@ -509,7 +545,11 @@ def crop_faces():
     cropped_count = sum(1 for r in results if r.get("success"))
     logger.info(f"crop-faces: {cropped_count}/{len(photos)} faces cropped successfully")
 
-    return jsonify({"results": results})
+    response = {"results": results}
+    if cancelled:
+        response["cancelled"] = True
+
+    return jsonify(response)
 
 
 # -------------------------------------------------------------------
